@@ -3,6 +3,8 @@
 
 #include <map>
 #include <string>
+#include <cstdlib>
+#include <memory>
 
 /**
  * @breif A data structure used to store pointer information.
@@ -63,6 +65,9 @@ public:
     template <class T>
     T *new_memory(size_t nSize, std::string file, int line);
 
+    template <class T>
+    T *malloc_memory(size_t nSize, std::string, int line);
+
     /***
      * @brief Release the specified pointer object.
      * @param Pointer parameter
@@ -86,6 +91,20 @@ inline T *memorycontrol::new_memory(size_t nSize,
     if (!pMem)
         return nullptr;
 
+    memory_info info;
+    info.flie_name = file;
+    info.line = line;
+    info.nSize = nSize;
+    memorycontrol::m_mc[pMem] = info;
+    return reinterpret_cast<T *>(pMem);
+}
+
+template <class T>
+inline T *memorycontrol::malloc_memory(size_t nSize, std::string file, int line)
+{
+    void *pMem = calloc(nSize, sizeof(char));
+    if (!pMem)
+        return nullptr;
     memory_info info;
     info.flie_name = file;
     info.line = line;
