@@ -5,69 +5,70 @@
 using namespace std;
 
 std::map<void *, memory_info> memorycontrol::m_mc;
-memorycontrol *memorycontrol::m_instance = nullptr;
+std::mutex memorycontrol::m_mtx;
 
 memorycontrol *memorycontrol::getInstance()
 {
-    if (!m_instance)
-        m_instance = new memorycontrol;
-    return m_instance;
-}
-
-memorycontrol::memorycontrol(/* args */)
-{
+    static memorycontrol instance;
+    return &instance;
 }
 
 memorycontrol::~memorycontrol()
 {
+    lock_guard<mutex> lock(m_mtx);
     cout << __func__ << endl;
-    if (memorycontrol::m_instance)
+    if (!m_mc.empty())
     {
-        if (!memorycontrol::m_mc.empty())
-        {
-            print_no_release();
-        }
-        else
-        {
-            cout << "memory normal." << endl;
-        }
+        print_no_release();
+    }
+    else
+    {
+        cout << "memory normal." << endl;
     }
 }
 
 int memorycontrol::delete_memory(void *p)
 {
+    lock_guard<mutex> lock(m_mtx);
+
     auto it = memorycontrol::m_mc.find(p);
-    if (it != memorycontrol::m_mc.end())
+    if (it == memorycontrol::m_mc.end())
     {
-        auto p_char = reinterpret_cast<char *>(it->first);
-        delete[] p_char;
-        p_char = nullptr;
-        memory_info info = it->second;
-        if (memorycontrol::m_mc.erase(p))
-        {
-            std::cout << "release memory: 0x" << std::hex << p
-                      << ", file:" << info.flie_name
-                      << ", line:" << std::dec << info.line
-                      << ", size:" << info.nSize
-                      << " succeed!" << std::endl;
-        }
-        else
-        {
-            std::cout << "release memory: 0x" << std::hex << p
-                      << ", file:" << info.flie_name
-                      << ", line:" << std::dec << info.line
-                      << ", size:" << info.nSize
-                      << " failed !" << std::endl;
-            return 2;
-        }
-    }
-    else
-    {
-        std::cout << "not find pointer: 0x" << std::hex << p << std::endl;
+        cout << "not find pointer: 0x" << hex << p << dec << endl;
         return 1;
     }
 
-    return 0;
+    memory_info info = it->second;
+
+    /* Free using the correct deallocator for the allocation method used. */
+    if (info.alloc_type == AllocType::NewArray)
+    {
+        auto p_char = reinterpret_cast<char *>(it->first);
+        delete[] p_char;
+    }
+    else
+    {
+        free(it->first);
+    }
+
+    if (memorycontrol::m_mc.erase(p))
+    {
+        cout << "release memory: 0x" << hex << p
+             << ", file:" << info.file_name
+             << ", line:" << dec << info.line
+             << ", size:" << info.nSize
+             << " succeed!" << endl;
+        return 0;
+    }
+    else
+    {
+        cout << "release memory: 0x" << hex << p
+             << ", file:" << info.file_name
+             << ", line:" << dec << info.line
+             << ", size:" << info.nSize
+             << " failed !" << endl;
+        return 2;
+    }
 }
 
 void memorycontrol::print_no_release()
@@ -76,7 +77,7 @@ void memorycontrol::print_no_release()
     {
         auto info = it.second;
         cout << hex << "0x" << it.first << " no release. "
-             << dec << " file:" << info.flie_name
+             << dec << " file:" << info.file_name
              << ". line:" << info.line
              << ". memory size:" << info.nSize
              << endl;

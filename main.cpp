@@ -3,31 +3,29 @@
 
 using namespace std;
 
-/**
- * @brief Initialize and generate a global management memory object.
- * @brief When the program exits, destruct and print whether the memory has been released normally.
- */
-void init()
-{
-    static memorycontrol g_instance;
-}
-
 int main(int args, char **argv)
 {
-    init();
-    std::cout << "ok \n"
-              << std::endl;
+    cout << "=== MemoryControl Demo ===" << endl;
 
-    int *p_test = NEW_MEMORY(int);
+    // ── 1. allocate via new char[] ──────────────────────────────────────
+    int *p_int = NEW_MEMORY(int);
+    *p_int = 42;
+    cout << "int value: " << *p_int << endl;
+    DELETE_MEMORY(p_int);   // safely freed with delete[]
 
-    *p_test = 123;
+    // ── 2. allocate via calloc ──────────────────────────────────────────
+    int *p_arr = CALLOC_MEMORY(int);
+    p_arr[0] = 10;
+    p_arr[1] = 20;
+    cout << "array: " << p_arr[0] << ", " << p_arr[1] << endl;
+    DELETE_MEMORY(p_arr);   // safely freed with free()
 
-    std::cout << *p_test << endl;
+    // ── 3. deliberate leak (detected at exit) ───────────────────────────
+    auto *p_leak = NEW_MEMORY(double);
+    *p_leak = 3.14;
+    cout << "leaked value: " << *p_leak << " (will be reported at exit)" << endl;
+    // NOTE: DELETE_MEMORY(p_leak) intentionally omitted to demonstrate leak detection
 
-    auto p_test2 = NEW_MEMORY(memory_info);
-
-    DELETE_MEMORY(p_test);
-    // DELETE_MEMORY(p_test2);
-
+    cout << "=== Done ===" << endl;
     return 0;
 }
