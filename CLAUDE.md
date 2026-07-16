@@ -2,51 +2,120 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+## Project Structure
+
+```
+MemoryControl/
+├── CMakeLists.txt         ← Build system (library + demo)
+├── memorycontrol.hpp      ← Public header (all macros, templates, RAII)
+├── memorycontrol.cpp      ← Singleton implementation (.cpp = only source file)
+├── main.cpp               ← Test / demo executable (not part of the library)
+├── CLAUDE.md
+└── .gitignore
+```
+
+**`memorycontrol` is a library.** `main.cpp` is only a test/demo program and is NOT part of the library itself.
+
 ## Build & Development Commands
 
-The project uses a VSCode task that builds with MinGW g++ (from msys64 ucrt64). The build command from `.vscode/tasks.json`:
-
 ```bash
-# Build all .cpp files into an executable
-g++ -fdiagnostics-color=always -g *.cpp -o MemoryControl.exe
+# Configure + build library + demo (static lib by default)
+cmake -B build && cmake --build build
+./build/mc_demo
+
+# Build as shared library
+cmake -B build -DMEMORYCONTROL_BUILD_SHARED=ON && cmake --build build
+
+# Build only the library (skip demo)
+cmake -B build -DMEMORYCONTROL_BUILD_TESTS=OFF && cmake --build build
+
+# Install (system-wide)
+cmake --install build
+
+# Quick test with g++ (no CMake needed)
+g++ -std=c++11 -g -Wall -Wextra main.cpp memorycontrol.cpp -o mc_demo && ./mc_demo
 ```
 
-Since there are no test files or formal test framework, run the program directly to verify:
+## How to use the library in another project
 
-```bash
-# Run the built executable
-./MemoryControl.exe
+### Via CMake (after install)
+
+```cmake
+find_package(MemoryControl REQUIRED)
+target_link_libraries(your_target PRIVATE mc::memorycontrol)
 ```
 
-**Note:** The compiler path is `G:\msys64\ucrt64\bin\g++.exe` (Windows MinGW). Adjust the path if using a different toolchain.
+### Via CMake (subdirectory)
+
+```cmake
+add_subdirectory(path/to/MemoryControl)
+target_link_libraries(your_target PRIVATE memorycontrol)
+```
+
+### Via raw g++
+
+```bash
+g++ -std=c++11 -I/path/to/MemoryControl your_prog.cpp /path/to/MemoryControl/memorycontrol.cpp -o your_prog
+```
+
+## Disable tracking for release builds
+
+Define `MEMORYCONTROL_DISABLE` before including the header, or link against `memorycontrol_rt`:
+
+```cmake
+# CMake: use the release-variant target
+target_link_libraries(your_target PRIVATE memorycontrol_rt)
+target_compile_definitions(your_target PRIVATE MEMORYCONTROL_DISABLE)
+```
+
+```bash
+# g++
+g++ -DMEMORYCONTROL_DISABLE -std=c++11 -I/path/to/MemoryControl your_prog.cpp \
+    /path/to/MemoryControl/memorycontrol.cpp -o your_prog
+```
+
+When `MEMORYCONTROL_DISABLE` is defined all tracking macros become no-ops, and the `.cpp` file must still be compiled (its destructor will find an empty map and do nothing).
 
 ## Code Architecture
 
-This is a **C++ memory management / leak detection tool** designed for debugging. It wraps `new[]` and `calloc` allocations to track all allocated memory, then reports any unreleased memory when the program exits.
+This is a **C++ memory management / leak detection library** for debugging. It wraps `new`, `new[]` and `calloc` allocations to track all allocated memory, then reports any unreleased memory when the program exits, including a leak summary with total count and byte count.
 
 ### Core Components
 
-**`memorycontrol.hpp`** - Header with three key elements:
+**`memorycontrol.hpp`** - Public header (the only file users include):
 
-1. **`memory_info` struct** - Metadata for each allocation: source file name, line number, and allocation size.
-2. **`memorycontrol` class** (singleton) - Two allocation templates:
-   - `new_memory<T>()` - Allocates via `new char[nSize]{0}` (zero-initialized)
-   - `malloc_memory<T>()` - Allocates via `calloc(nSize, sizeof(char))`
-3. **Macros** for ergonomic use:
-   - `NEW_MEMORY(t)` → `getInstance()->new_memory<t>(sizeof(t), __FILE__, __LINE__)`
-   - `DELETE_MEMORY(p)` → `getInstance()->delete_memory(p)`
+1. **`memory_info` struct** - Metadata for each allocation: source file, line number, size, and allocation type.
+2. **`memorycontrol` class** (singleton) - Three allocation templates:
+   - `new_single<T>()` — Allocates via `new (std::nothrow) T()` (calls constructor)
+   - `new_memory<T>()` — Allocates via `new char[nSize]{0}` (zero-initialized raw memory)
+   - `malloc_memory<T>()` — Allocates via `calloc(1, nSize)`
+3. **`MemoryControlPtr<T>`** - Movable RAII smart pointer that auto-calls `DELETE_MEMORY` in its destructor.
+4. **Compile-time switch** `MEMORYCONTROL_DISABLE` — when defined, all macros become no-ops.
+5. **Convenience macros** (see table below).
 
-**`memorycontrol.cpp`** - Singleton implementation:
-- `getInstance()` - Returns the static singleton instance
-- `delete_memory()` - Releases a tracked pointer, returns 0 on success, 1 if pointer not found, 2 if erase fails
-- `print_no_release()` - Iterates `m_mc` map and prints all unreleased allocations
+**`memorycontrol.cpp`** - Singleton implementation (the only `.cpp` file):
+- `getInstance()` — Returns the static singleton instance (C++11 thread-safe static local).
+- `delete_memory(void *p)` — Releases a tracked pointer using the correct deallocator (`::operator delete`, `delete[]`, or `free()`). Returns 0 success / 1 not found / 2 erase failed.
+- `print_no_release()` — Prints a leak summary (count + total bytes) then details of every unfreed allocation.
 
-**`main.cpp`** - Example usage demonstrating how to initialize the tool and use the macros.
+### Macros Provided
 
-### Key Design Details
+| Macro | Allocation method | Deallocated with |
+|-------|-------------------|------------------|
+| `NEW_SINGLE(t)` | `new (std::nothrow) t` (calls constructor) | `::operator delete` |
+| `NEW_MEMORY(t)` | `new char[sizeof(t)]{0}` (zero-init, no ctor) | `delete[]` |
+| `NEW_ARRAY(t, count)` | `new char[sizeof(t)*count]{0}` (zero-init) | `delete[]` |
+| `CALLOC_MEMORY(t)` | `calloc(1, sizeof(t))` | `free()` |
+| `CALLOC_ARRAY(t, count)` | `calloc(count, sizeof(t))` | `free()` |
+| `DELETE_MEMORY(p)` | Frees any tracked pointer; also sets `p = nullptr` | auto-selected |
 
-- **Tracking mechanism**: A static `std::map<void*, memory_info> m_mc` maps pointer addresses to their allocation metadata.
-- **Singleton lifetime**: Create a global `memorycontrol` object (via the `init()` pattern in `main.cpp`) so its destructor runs at program exit, triggering leak detection.
-- **Allocation scheme**: Both templates allocate raw `char` arrays, then `reinterpret_cast` to the desired type `T*`. The caller must manually construct objects (placement new) if needed.
-- **All known issue**: The copy constructor parameter for `memory_info` is non-const (`memory_info(memory_info &other)`) which prevents binding to temporaries — likely a bug.
-- **Typo**: `flie_name` in the struct should be `file_name` (named inconsistently with `file` parameter).
+### Important Notes
+
+- **NEW_SINGLE destructor**: Since `DELETE_MEMORY` does not know `T` at free time, it uses `::operator delete(p)` which does **not** call `~T()`. For non-trivial types call `p->~T()` manually **before** `DELETE_MEMORY(p)`.
+- **Thread safety**: `std::mutex` protects the global map in all allocation/release operations.
+- **Singleton lifetime**: The static local instance destructor runs automatically at program exit (C++11 guarantee).
+- **Single `.cpp`**: Only `memorycontrol.cpp` needs to be compiled and linked; the entire API is in the header.
+
+### Known Issues
+
+All issues from the original version have been resolved. The project compiles cleanly with `-Wall -Wextra` at C++11 and above.

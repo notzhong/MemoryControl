@@ -1,10 +1,67 @@
 #ifndef MEMORYCONTROL_HPP
 #define MEMORYCONTROL_HPP
 
+/**
+ * @brief Compile-time switch to disable all memory tracking.
+ *
+ * Define MEMORYCONTROL_DISABLE before including this header to make all
+ * macros into no-ops.  This allows zero-overhead in release builds while
+ * keeping the same code structure.
+ *
+ * @code
+ *   // In CMakeLists.txt or compiler flags:
+ *   add_definitions(-DMEMORYCONTROL_DISABLE)
+ * @endcode
+ */
+#ifdef MEMORYCONTROL_DISABLE
+
+// ── no-op macros ───────────────────────────────────────────────────────────
+#include <cstddef>  // nullptr_t
+
+#define NEW_MEMORY(t)         static_cast<t *>(::operator new(sizeof(t), std::nothrow))
+#define NEW_SINGLE(t)         static_cast<t *>(::operator new(sizeof(t), std::nothrow))
+#define NEW_ARRAY(t, count)   static_cast<t *>(::operator new(sizeof(t) * (count), std::nothrow))
+#define CALLOC_MEMORY(t)      static_cast<t *>(::calloc(1, sizeof(t)))
+#define CALLOC_ARRAY(t, count) static_cast<t *>(::calloc(count, sizeof(t)))
+#define DELETE_MEMORY(p)      do { if (p) { ::operator delete(p); p = nullptr; } } while(0)
+
+// No-op RAII wrapper (degenerates to raw pointer)
+template <typename T>
+class MemoryControlPtr
+{
+    T *ptr_;
+public:
+    explicit MemoryControlPtr(T *p = nullptr) : ptr_(p) {}
+    ~MemoryControlPtr() { if (ptr_) ::operator delete(ptr_); }
+    // ... (simplified; released builds should use std::unique_ptr instead)
+    T *get() const { return ptr_; }
+    T *release() { T *p = ptr_; ptr_ = nullptr; return p; }
+    void reset(T *p = nullptr) { if (ptr_) ::operator delete(ptr_); ptr_ = p; }
+    T &operator*() const { return *ptr_; }
+    T *operator->() const { return ptr_; }
+    explicit operator bool() const { return ptr_ != nullptr; }
+
+    MemoryControlPtr(const MemoryControlPtr &) = delete;
+    MemoryControlPtr &operator=(const MemoryControlPtr &) = delete;
+    MemoryControlPtr(MemoryControlPtr &&other) noexcept : ptr_(other.ptr_) { other.ptr_ = nullptr; }
+    MemoryControlPtr &operator=(MemoryControlPtr &&other) noexcept
+    {
+        if (this != &other)
+        {
+            if (ptr_) ::operator delete(ptr_);
+            ptr_ = other.ptr_;
+            other.ptr_ = nullptr;
+        }
+        return *this;
+    }
+};
+
+#else // ── normal (tracking) mode ────────────────────────────────────────────
+
 #include <map>
 #include <string>
 #include <cstdlib>
-#include <memory>
+#include <cstdint>
 #include <mutex>
 
 /**
@@ -13,8 +70,9 @@
  */
 enum class AllocType : uint8_t
 {
-    NewArray, ///< allocated via new char[n]
-    Calloc    ///< allocated via calloc()
+    NewSingle, ///< allocated via new (single object)
+    NewArray,  ///< allocated via new char[n]
+    Calloc     ///< allocated via calloc()
 };
 
 /**
@@ -22,16 +80,12 @@ enum class AllocType : uint8_t
  */
 struct memory_info
 {
-    std::string file_name; ///< source file where allocation occurred
-    int line;              ///< source line where allocation occurred
-    int nSize;             ///< requested allocation size in bytes
-    AllocType alloc_type;  ///< which allocation method was used
+    std::string file_name;         ///< source file where allocation occurred
+    int line         = 0;          ///< source line where allocation occurred
+    int nSize        = 0;          ///< requested allocation size in bytes
+    AllocType alloc_type = AllocType::NewArray; ///< which allocation method was used
 
-    memory_info() : file_name(""), line(0), nSize(0), alloc_type(AllocType::NewArray) {}
-    memory_info(const memory_info &other)
-        : file_name(other.file_name), line(other.line), nSize(other.nSize), alloc_type(other.alloc_type)
-    {
-    }
+    memory_info() = default;
 };
 
 /**
@@ -40,15 +94,15 @@ struct memory_info
  *        All allocations performed through the provided macros are tracked in a
  *        global map keyed by pointer address.  On normal program exit the
  *        singleton destructor runs automatically (C++ static-local guarantee)
- *        and prints any unreleased allocations.
+ *        and prints any unreleased allocations with a summary.
  *
  *        Usage:
  * @code
- *     int *p = NEW_MEMORY(int);       // new char[] internally
+ *     int *p = NEW_SINGLE(int);      // new (nothrow) int
  *     DELETE_MEMORY(p);
  *
- *     int *q = CALLOC_MEMORY(int);    // calloc internally
- *     DELETE_MEMORY(q);               // same macro — handles both methods
+ *     int *q = CALLOC_MEMORY(int);   // calloc internally
+ *     DELETE_MEMORY(q);              // same macro — handles both methods
  * @endcode
  */
 class memorycontrol
@@ -79,6 +133,21 @@ public:
      *        The instance destructor runs automatically at program exit.
      */
     static memorycontrol *getInstance();
+
+    /**
+     * @brief Allocate a single object of type T via new (nothrow).
+     *
+     *        Unlike new_memory, this calls T's constructor (via new T).
+     *        For trivial types this is equivalent to malloc(sizeof(T)).
+     *
+     * @note  When freeing via DELETE_MEMORY, T's destructor is NOT called
+     *        (since T's type is unknown at free time).  For non-trivial
+     *        types call `p->~T()` manually BEFORE DELETE_MEMORY(p).
+     *
+     * @return Pointer to T, or nullptr on failure.
+     */
+    template <class T>
+    T *new_single(std::string file, int line);
 
     /**
      * @brief Allocate nSize bytes via new char[] and track the allocation.
@@ -113,10 +182,10 @@ public:
     /**
      * @brief Release a tracked pointer and remove it from the map.
      *
-     *        Automatically selects delete[] or free() based on the
+     *        Automatically selects delete, delete[] or free() based on the
      *        allocation method stored at allocation time.
      *
-     * @param p Pointer previously returned by NEW_MEMORY / CALLOC_MEMORY.
+     * @param p Pointer previously returned by any allocation macro.
      * @return 0 on success;
      *         1 if pointer is not found in the tracker;
      *         2 if map erase fails.
@@ -124,12 +193,33 @@ public:
     int delete_memory(void *p);
 
     /**
-     * @brief Print information for every still-tracked (unreleased) pointer.
+     * @brief Print a summary and then information for every still-tracked pointer.
      */
     void print_no_release();
 };
 
 // ── template implementations ───────────────────────────────────────────────
+
+template <class T>
+inline T *memorycontrol::new_single(std::string file, int line)
+{
+    T *pMem = new (std::nothrow) T();
+    if (!pMem)
+        return nullptr;
+
+    memory_info info;
+    info.file_name  = file;
+    info.line       = line;
+    info.nSize      = sizeof(T);
+    info.alloc_type = AllocType::NewSingle;
+
+    {
+        std::lock_guard<std::mutex> lock(m_mtx);
+        memorycontrol::m_mc[pMem] = info;
+    }
+
+    return pMem;
+}
 
 template <class T>
 inline T *memorycontrol::new_memory(size_t nSize,
@@ -178,21 +268,111 @@ inline T *memorycontrol::malloc_memory(size_t nSize,
 // ── convenience macros ─────────────────────────────────────────────────────
 
 /**
- * @brief Allocate memory for type t using operator new[] (zero-initialised).
- * @param t  The type to allocate memory for.
+ * @brief Allocate a single object of type t using new (nothrow) — calls constructor.
+ * @param t  The type to allocate.
  */
-#define NEW_MEMORY(t)     memorycontrol::getInstance()->new_memory<t>(sizeof(t), __FILE__, __LINE__)
+#define NEW_SINGLE(t)         memorycontrol::getInstance()->new_single<t>(__FILE__, __LINE__)
 
 /**
- * @brief Allocate memory for type t using calloc (zero-initialised).
+ * @brief Allocate memory for one element of type t using operator new[] (zero-initialised).
  * @param t  The type to allocate memory for.
  */
-#define CALLOC_MEMORY(t)  memorycontrol::getInstance()->malloc_memory<t>(sizeof(t), __FILE__, __LINE__)
+#define NEW_MEMORY(t)         memorycontrol::getInstance()->new_memory<t>(sizeof(t), __FILE__, __LINE__)
 
 /**
- * @brief Release memory previously allocated via NEW_MEMORY or CALLOC_MEMORY.
- * @param p  The pointer to release.
+ * @brief Allocate an array of count elements of type t using operator new[] (zero-initialised).
+ * @param t      The element type.
+ * @param count  Number of elements to allocate.
  */
-#define DELETE_MEMORY(p)  memorycontrol::getInstance()->delete_memory(p)
+#define NEW_ARRAY(t, count)   memorycontrol::getInstance()->new_memory<t>(sizeof(t) * (count), __FILE__, __LINE__)
 
-#endif
+/**
+ * @brief Allocate memory for one element of type t using calloc (zero-initialised).
+ * @param t  The type to allocate memory for.
+ */
+#define CALLOC_MEMORY(t)      memorycontrol::getInstance()->malloc_memory<t>(sizeof(t), __FILE__, __LINE__)
+
+/**
+ * @brief Allocate an array of count elements of type t using calloc (zero-initialised).
+ * @param t      The element type.
+ * @param count  Number of elements to allocate.
+ */
+#define CALLOC_ARRAY(t, count) memorycontrol::getInstance()->malloc_memory<t>(sizeof(t) * (count), __FILE__, __LINE__)
+
+/**
+ * @brief Release memory previously allocated via any allocation macro.
+ * @param p  The pointer to release.  Set to nullptr after free.
+ */
+#define DELETE_MEMORY(p)      do { memorycontrol::getInstance()->delete_memory(p); p = nullptr; } while(0)
+
+// ── RAII wrapper (only available in tracking mode) ─────────────────────────
+
+/**
+ * @brief RAII smart pointer that automatically calls DELETE_MEMORY on destruction.
+ *
+ *        Movable but not copyable.  Degenerates gracefully when MEMORYCONTROL_DISABLE
+ *        is defined (the no-op version uses ::operator delete directly).
+ *
+ * @tparam T  The pointee type.
+ */
+template <typename T>
+class MemoryControlPtr
+{
+    T *ptr_;
+
+public:
+    explicit MemoryControlPtr(T *p = nullptr) noexcept : ptr_(p) {}
+
+    ~MemoryControlPtr() noexcept
+    {
+        if (ptr_)
+            DELETE_MEMORY(ptr_);
+    }
+
+    // Non-copyable
+    MemoryControlPtr(const MemoryControlPtr &) = delete;
+    MemoryControlPtr &operator=(const MemoryControlPtr &) = delete;
+
+    // Movable
+    MemoryControlPtr(MemoryControlPtr &&other) noexcept : ptr_(other.ptr_)
+    {
+        other.ptr_ = nullptr;
+    }
+
+    MemoryControlPtr &operator=(MemoryControlPtr &&other) noexcept
+    {
+        if (this != &other)
+        {
+            if (ptr_)
+                DELETE_MEMORY(ptr_);
+            ptr_ = other.ptr_;
+            other.ptr_ = nullptr;
+        }
+        return *this;
+    }
+
+    /// Accessors
+    T *get() const noexcept { return ptr_; }
+
+    T *release() noexcept
+    {
+        T *p = ptr_;
+        ptr_ = nullptr;
+        return p;
+    }
+
+    void reset(T *p = nullptr) noexcept
+    {
+        if (ptr_)
+            DELETE_MEMORY(ptr_);
+        ptr_ = p;
+    }
+
+    T &operator*() const noexcept { return *ptr_; }
+    T *operator->() const noexcept { return ptr_; }
+    explicit operator bool() const noexcept { return ptr_ != nullptr; }
+};
+
+#endif // MEMORYCONTROL_DISABLE
+
+#endif // MEMORYCONTROL_HPP
