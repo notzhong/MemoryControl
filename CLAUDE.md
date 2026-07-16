@@ -33,7 +33,7 @@ cmake -B build -DMEMORYCONTROL_BUILD_TESTS=OFF && cmake --build build
 cmake --install build
 
 # Quick test with g++ (no CMake needed)
-g++ -std=c++11 -g -Wall -Wextra main.cpp memorycontrol.cpp -o mc_demo && ./mc_demo
+g++ -std=c++17 -g -Wall -Wextra main.cpp memorycontrol.cpp -o mc_demo && ./mc_demo
 ```
 
 ## How to use the library in another project
@@ -55,7 +55,7 @@ target_link_libraries(your_target PRIVATE memorycontrol)
 ### Via raw g++
 
 ```bash
-g++ -std=c++11 -I/path/to/MemoryControl your_prog.cpp /path/to/MemoryControl/memorycontrol.cpp -o your_prog
+g++ -std=c++17 -I/path/to/MemoryControl your_prog.cpp /path/to/MemoryControl/memorycontrol.cpp -o your_prog
 ```
 
 ## Disable tracking for release builds
@@ -70,7 +70,7 @@ target_compile_definitions(your_target PRIVATE MEMORYCONTROL_DISABLE)
 
 ```bash
 # g++
-g++ -DMEMORYCONTROL_DISABLE -std=c++11 -I/path/to/MemoryControl your_prog.cpp \
+g++ -DMEMORYCONTROL_DISABLE -std=c++17 -I/path/to/MemoryControl your_prog.cpp \
     /path/to/MemoryControl/memorycontrol.cpp -o your_prog
 ```
 
@@ -84,7 +84,7 @@ This is a **C++ memory management / leak detection library** for debugging. It w
 
 **`memorycontrol.hpp`** - Public header (the only file users include):
 
-1. **`memory_info` struct** - Metadata for each allocation: source file, line number, size, and allocation type.
+1. **`AllocRecord` struct** - Metadata for each allocation: source file, line number, size, allocation type and call stack.
 2. **`memorycontrol` class** (singleton) - Three allocation templates:
    - `new_single<T>()` — Allocates via `new (std::nothrow) T()` (calls constructor)
    - `new_memory<T>()` — Allocates via `new char[nSize]{0}` (zero-initialized raw memory)
